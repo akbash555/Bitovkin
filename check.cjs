@@ -8,8 +8,9 @@ const { randomUUID } = require('node:crypto');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'bytovkin-check-'));
 const password = 'Only-for-local-checks-1';
 const origin = 'https://example.test';
-Object.assign(process.env, { DATA_DIR:temp, ADMIN_PASSWORD:password, SITE_URL:origin, LEADS_ENABLED:'1', LEGAL_VERSION:'test-1', LEAD_WEBHOOK_URL:'', METRIKA_ID:'' });
-const { handler } = require('./server.cjs');
+const hosted = process.argv.includes('--vercel');
+Object.assign(process.env, { DATA_DIR:temp, ADMIN_PASSWORD:password, SITE_URL:origin, LEADS_ENABLED:'1', LEGAL_VERSION:'test-1', LEAD_WEBHOOK_URL:'', METRIKA_ID:'', VERCEL:hosted?'1':'', TURSO_DATABASE_URL:'' });
+const handler = hosted ? require('./api/site.js') : require('./server.cjs').handler;
 let cookie = '';
 let csrf = '';
 
@@ -44,6 +45,24 @@ async function request(route, {values, auth = false, crossSite = false} = {}) {
 }
 
 async function main() {
+  if (hosted) {
+    const root = await request('/api/site?__bytovkin_route=');
+    assert.equal(root.status,200);
+    assert.match(root.body,/Бытовки и модульные конструкции от производителя/);
+    const catalog = await request('/api/site?__bytovkin_route=catalog.html&material='+encodeURIComponent('Дерево'));
+    assert.equal(catalog.status,200);
+    assert.equal(catalog.body.match(/<article class="card"/g).length,3);
+    const model = await request('/api/site?__bytovkin_route=models%2Fconstruction.html');
+    assert.equal(model.status,200);
+    assert.match(model.body,/Строительная бытовка/);
+    assert.match(model.body,/приём заявок включится после подключения базы/i);
+    assert.equal((await request('/api/site?__bytovkin_route=admin')).status,503);
+    assert.equal((await request('/api/site?__bytovkin_route=lead',{values:{type:'callback'}})).status,503);
+    assert.equal((await request('/api/site?__bytovkin_route=sitemap.xml')).status,200);
+    assert.equal(fs.readdirSync(temp).length,0);
+    console.log('Проверен режим Vercel без постоянной базы: главная, фильтр, карточка, карта сайта и блокировка записи.');
+    return;
+  }
   const home = await request('/');
   assert.equal(home.status,200);
   assert.match(home.body,/Бытовки и модульные конструкции от производителя/);

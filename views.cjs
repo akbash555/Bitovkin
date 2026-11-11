@@ -30,15 +30,16 @@ function lead(site, type, models = [], selected = '', source = '') {
   const modelField = selected
     ? `<input type="hidden" name="model" value="${e(selected)}">`
     : `<label>Модель<select name="model"><option value="">Помогите подобрать</option>${models.map(m => `<option value="${e(m.id)}">${e(m.name)}</option>`).join('')}</select></label>`;
-  return `<form class="lead" action="/lead" method="post" enctype="multipart/form-data" data-lead>
+  const maxMB = site.drawingMB || 8;
+  return `<form class="lead" action="/lead" method="post" enctype="multipart/form-data" data-lead data-drawing-mb="${maxMB}">
   <input type="hidden" name="type" value="${type}"><input type="hidden" name="source" value="${e(source)}">
   <div class="trap" aria-hidden="true"><label>Сайт<input name="website" tabindex="-1" autocomplete="off"></label></div>
   <div class="form-row"><label>Имя<input name="name" autocomplete="${site.demo ? 'off' : 'given-name'}" maxlength="80" required></label><label>Телефон<input name="phone" type="tel" autocomplete="${site.demo ? 'off' : 'tel'}" placeholder="+7 (___) ___-__-__" maxlength="30" required></label></div>
   ${type === 'quote' ? modelField : ''}
   ${type !== 'callback' ? `<label>${type === 'project' ? 'Описание задачи' : 'Комментарий (необязательно)'}<textarea name="message" rows="3" maxlength="2500" ${type === 'project' ? 'required' : ''}></textarea></label>` : ''}
-  ${type === 'project' ? '<label>Чертёж или ТЗ (необязательно)<input type="file" name="drawing" accept=".pdf,.png,.jpg,.jpeg,.txt"><small>PDF, PNG, JPEG или TXT, до 8 МБ</small></label>' : ''}
+  ${type === 'project' ? `<label>Чертёж или ТЗ (необязательно)<input type="file" name="drawing" accept=".pdf,.png,.jpg,.jpeg,.txt"><small>PDF, PNG, JPEG или TXT, до ${maxMB} МБ</small></label>` : ''}
   <label class="check"><input type="checkbox" name="consent" value="yes" required><span>${site.demo ? 'Использую вымышленные данные для тестовой заявки.' : 'Даю <a href="/consent.html" target="_blank" rel="noopener">согласие на обработку персональных данных</a>.'}</span></label>
-  ${site.leads ? '' : '<p class="notice">Приём заявок закрыт до настройки документов. Форма доступна для просмотра.</p>'}
+  ${site.leads ? '' : `<p class="notice">${site.readOnly ? 'Форма доступна для просмотра. Приём заявок включится после подключения базы и настройки документов.' : 'Приём заявок закрыт до настройки документов. Форма доступна для просмотра.'}</p>`}
   <button class="button" type="submit" ${site.leads ? '' : 'disabled'}>${labels[type]} <span aria-hidden="true">↗</span></button>
   <p class="form-status" role="status" aria-live="polite" hidden></p></form>`;
 }

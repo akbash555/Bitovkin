@@ -75,8 +75,9 @@ for (const form of document.querySelectorAll('[data-lead]')) {
       form.elements.phone.focus();
       return;
     }
-    if (values.get('drawing')?.size > 8 * 1024 * 1024) {
-      show('Файл превышает 8 МБ.',true);
+    const maxDrawingMB = Number(form.dataset.drawingMb);
+    if (values.get('drawing')?.size > maxDrawingMB * 1024 * 1024) {
+      show('Файл превышает ' + maxDrawingMB + ' МБ.',true);
       return;
     }
     requestId ||= globalThis.crypto?.randomUUID?.() || '';

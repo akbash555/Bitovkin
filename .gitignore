@@ -3,3 +3,6 @@ data/
 .env.*
 !.env.example
 /.openai/hosting.json
+/.vercel/
+/node_modules/
+/vercel-output/

@@ -2,7 +2,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomBytes, randomUUID, createHash, timingSafeEqual } = require('node:crypto');
-const { DatabaseSync } = require('node:sqlite');
+const { openDatabase } = require('./database.cjs');
 const { render, layout, e, url } = require('./views.cjs');
 const { renderAdmin, statuses } = require('./admin.cjs');
 const seed = require('./catalog.cjs');
@@ -12,6 +12,8 @@ const host = process.env.HOST || '127.0.0.1';
 const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host);
 const demo = process.argv.includes('--demo');
 const origin = !demo && process.env.SITE_URL ? new URL(process.env.SITE_URL).origin : '';
+const hosted = process.env.VERCEL === '1';
+const readOnly = hosted && !process.env.TURSO_DATABASE_URL;
 if (origin && !origin.startsWith('https://')) throw new Error('SITE_URL must be an HTTPS origin.');
 if (!loopback && !origin) throw new Error('Set SITE_URL to the HTTPS origin before binding a public interface.');
 const localOrigin = `http://${host === '::1' ? '[::1]' : host}:${port}`;
@@ -20,37 +22,51 @@ const legalVersion = demo ? 'local-test' : process.env.LEGAL_VERSION?.trim();
 const metrika = !demo && /^\d{1,15}$/.test(process.env.METRIKA_ID || '') ? process.env.METRIKA_ID : '';
 const webhook = !demo && process.env.LEAD_WEBHOOK_URL ? new URL(process.env.LEAD_WEBHOOK_URL) : null;
 if (webhook && webhook.protocol !== 'https:') throw new Error('LEAD_WEBHOOK_URL must be HTTPS.');
-const data = path.resolve(demo ? path.join(__dirname,'data','demo') : process.env.DATA_DIR || path.join(__dirname, 'data'));
-fs.mkdirSync(data, { recursive: true, mode: 0o700 });
-const db = new DatabaseSync(path.join(data, 'site.sqlite'));
-db.exec(`PRAGMA journal_mode=WAL;
-  CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS company(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY, mime TEXT NOT NULL, content BLOB NOT NULL);
-  CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS leads(
+const db = openDatabase({hosted,demo});
+const schema = [
+  'CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY, payload TEXT NOT NULL)',
+  'CREATE TABLE IF NOT EXISTS company(id INTEGER PRIMARY KEY, payload TEXT NOT NULL)',
+  'CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY, mime TEXT NOT NULL, content BLOB NOT NULL)',
+  'CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY, expires INTEGER NOT NULL)',
+  `CREATE TABLE IF NOT EXISTS leads(
     id INTEGER PRIMARY KEY, request_id TEXT UNIQUE, type TEXT NOT NULL, name TEXT NOT NULL,
     phone TEXT NOT NULL, model_name TEXT, message TEXT, source TEXT NOT NULL, created_at TEXT NOT NULL,
     legal_version TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new',
     attachment_name TEXT, attachment BLOB, notification TEXT NOT NULL DEFAULT 'off'
-  );`);
+  )`
+];
 const defaultCompany = {phone:'', email:'', address:'', logo:'', accent:'#b84021', ink:'#212922', paper:'#f6f5ef', privacy:'', consent:''};
-if (!db.prepare('SELECT 1 FROM company WHERE id=1').get()) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    if (!db.prepare('SELECT 1 FROM company WHERE id=1').get()) {
-      const insert = db.prepare('INSERT INTO models VALUES (?, ?)');
-      seed.forEach(m => insert.run(m.id, JSON.stringify(m)));
-      db.prepare('INSERT INTO company VALUES (1, ?)').run(JSON.stringify(defaultCompany));
+const statement = (sql,...args) => ({sql,args});
+let initialized;
+function initialize() {
+  initialized ??= (async () => {
+    await db.batch(schema.map(sql=>statement(sql)));
+    if (!await db.get('SELECT 1 FROM company WHERE id=1')) {
+      await db.batch([
+        ...seed.map(model=>statement('INSERT OR IGNORE INTO models VALUES (?, ?)',model.id,JSON.stringify(model))),
+        statement('INSERT OR IGNORE INTO company VALUES (1, ?)',JSON.stringify(defaultCompany))
+      ]);
     }
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
+  })().catch(error=>{
+    initialized = undefined;
     throw error;
+  });
+  return initialized;
+}
+async function loadCompany() {
+  const row = await db.get('SELECT payload FROM company WHERE id=1');
+  return {...defaultCompany,...JSON.parse(row.payload)};
+}
+async function allModels() {
+  const rows = await db.all('SELECT payload FROM models ORDER BY rowid');
+  return rows.map(row=>JSON.parse(row.payload));
+}
+const trustedOrigins = new Set(origin || hosted ? [origin].filter(Boolean) : [localOrigin,`http://localhost:${port}`,`http://127.0.0.1:${port}`]);
+if (hosted) {
+  for (const value of [process.env.VERCEL_URL,process.env.VERCEL_PROJECT_PRODUCTION_URL,process.env.VERCEL_BRANCH_URL]) {
+    if (/^[a-z0-9-]+\.vercel\.app$/i.test(value || '')) trustedOrigins.add('https://'+value);
   }
 }
-const loadCompany = () => ({...defaultCompany, ...JSON.parse(db.prepare('SELECT payload FROM company WHERE id=1').get().payload)});
-const allModels = () => db.prepare('SELECT payload FROM models ORDER BY rowid').all().map(r => JSON.parse(r.payload));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const sessionHash = token => hash(token+':'+adminPassword);
 const safeEqual = (a,b) => timingSafeEqual(Buffer.from(hash(a)),Buffer.from(hash(b)));
@@ -76,14 +92,18 @@ const cache = new Map();
 const minutes = 60_000;
 const rateWindow = 15 * minutes;
 const photoLimit = 4 * 1024 * 1024;
-const drawingLimit = 8 * 1024 * 1024;
-const cleanup = setInterval(() => {
-  for (const [key, record] of cache) if (record.until <= Date.now()) cache.delete(key);
-  db.prepare('DELETE FROM sessions WHERE expires <= ?').run(Date.now());
-}, minutes).unref();
+const drawingMB = hosted ? 4 : 8;
+const drawingLimit = drawingMB * 1024 * 1024;
+const requestLimit = hosted ? 4_400_000 : 21 * 1024 * 1024;
+const ipAddress = req => (hosted && req.headers['x-vercel-forwarded-for']) || req.socket.remoteAddress;
+let nextRateCleanup = 0;
 
 function rate(key, max) {
   const now = Date.now();
+  if (now >= nextRateCleanup) {
+    for (const [key, record] of cache) if (record.until <= now) cache.delete(key);
+    nextRateCleanup = now+minutes;
+  }
   let record = cache.get(key);
   if (!record || record.until <= now) {
     if (cache.size >= 50_000) fail(503, 'Сервис занят. Попробуйте позже.');
@@ -94,9 +114,8 @@ function rate(key, max) {
 }
 
 function verifyOrigin(req) {
-  const allowed = origin ? [origin] : [localOrigin, `http://localhost:${port}`, `http://127.0.0.1:${port}`];
-  if (req.headers.origin && allowed.includes(req.headers.origin)) return;
-  if (!req.headers.origin && req.headers.referer && allowed.some(value=>req.headers.referer.startsWith(value+'/'))) return;
+  if (req.headers.origin && trustedOrigins.has(req.headers.origin)) return;
+  if (!req.headers.origin && req.headers.referer && [...trustedOrigins].some(value=>req.headers.referer.startsWith(value+'/'))) return;
   fail(403,'Откройте форму на сайте и попробуйте ещё раз.');
 }
 
@@ -142,14 +161,11 @@ async function prepareImage(upload) {
   if (!mime) fail(400,'Загрузите фотографию JPEG, PNG или WebP.');
   return {id:randomUUID(), mime, bytes};
 }
-function storeMedia(media) {
-  if (!media) return '';
-  db.prepare('INSERT INTO media VALUES (?, ?, ?)').run(media.id,media.mime,media.bytes);
-  return '/media/'+media.id;
-}
+const mediaPath = media => '/media/'+media.id;
+const insertMedia = media => statement('INSERT INTO media VALUES (?, ?, ?)',media.id,media.mime,media.bytes);
 async function prepareDrawing(upload) {
   if (!file(upload)) return {};
-  if (upload.size > drawingLimit) fail(413,'Размер чертежа превышает 8 МБ.');
+  if (upload.size > drawingLimit) fail(413,`Размер чертежа превышает ${drawingMB} МБ.`);
   const bytes = Buffer.from(await upload.arrayBuffer());
   const extension = path.extname(upload.name).toLowerCase();
   const valid = (extension==='.pdf' && bytes.toString('ascii',0,5)==='%PDF-') ||
@@ -159,62 +175,66 @@ async function prepareDrawing(upload) {
   if (!valid) fail(400,'Загрузите чертёж в формате PDF, PNG, JPEG или TXT.');
   return {name:path.basename(upload.name.replaceAll('\\','/')).replace(/[\u0000-\u001f\u007f]/g,'').slice(0,140),bytes};
 }
-function session(req) {
+async function session(req) {
   if (adminPassword.length < 12) return '';
   const token = /(?:^|;\s*)bytovkin_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie || '')?.[1];
   if (!token) return '';
   const digest = sessionHash(token);
-  return db.prepare('SELECT 1 FROM sessions WHERE hash=? AND expires>?').get(digest,Date.now()) ? digest : '';
+  return await db.get('SELECT 1 FROM sessions WHERE hash=? AND expires>?',digest,Date.now()) ? digest : '';
 }
-const cookie = (value, age) => `bytovkin_session=${value}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=${age}${origin ? '; Secure' : ''}`;
-const adminPage = (company,site,token,edit,error) => renderAdmin({
-  company,site,token,edit,error,models:token ? allModels() : [],
-  leads:token && !edit ? db.prepare('SELECT id,type,name,phone,model_name,message,source,created_at,status,attachment_name FROM leads ORDER BY id DESC').all() : []
+const cookie = (value, age) => `bytovkin_session=${value}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=${age}${origin || hosted ? '; Secure' : ''}`;
+const adminPage = async (company,site,token,edit,error) => renderAdmin({
+  company,site,token,edit,error,models:token && !edit ? await allModels() : [],
+  leads:token && !edit ? await db.all('SELECT id,type,name,phone,model_name,message,source,created_at,status,attachment_name FROM leads ORDER BY id DESC') : []
 });
 
 async function admin(req,res,route,company,site) {
-  const token = session(req);
-  if (req.method === 'GET' && route === '/admin') return respond(res,200,adminPage(company,site,token));
+  if (readOnly) fail(503,'Панель управления станет доступна после подключения базы данных.');
+  const token = await session(req);
+  if (req.method === 'GET' && route === '/admin') return respond(res,200,await adminPage(company,site,token));
   if (req.method === 'POST' && route === '/admin/login') {
     verifyOrigin(req);
-    rate('login:'+req.socket.remoteAddress,8);
+    rate('login:'+ipAddress(req),8);
     const form = await formData(req,4096);
     if (adminPassword.length < 12 || !safeEqual(field(form,'password',512),adminPassword)) {
-      return respond(res,401,adminPage(company,site,'',null,'Проверьте пароль и настройку доступа.'));
+      return respond(res,401,await adminPage(company,site,'',null,'Проверьте пароль и настройку доступа.'));
     }
     const value = randomBytes(32).toString('hex');
-    db.prepare('INSERT INTO sessions VALUES (?, ?)').run(sessionHash(value),Date.now()+8*60*minutes);
+    await db.batch([
+      statement('DELETE FROM sessions WHERE expires <= ?',Date.now()),
+      statement('INSERT INTO sessions VALUES (?, ?)',sessionHash(value),Date.now()+8*60*minutes)
+    ]);
     return redirect(res,'/admin',{'Set-Cookie':cookie(value,28800)});
   }
   if (!token) return req.method==='GET' ? redirect(res,'/admin') : fail(401,'Войдите в панель управления.');
   if (req.method === 'GET') {
     if (route.startsWith('/admin/model/')) {
       const id = route.split('/').pop();
-      const edit = id === 'new' ? {visible:true,photos:[]} : allModels().find(m=>m.id===id);
-      if (edit) return respond(res,200,adminPage(company,site,token,edit));
+      const edit = id === 'new' ? {visible:true,photos:[]} : (await allModels()).find(m=>m.id===id);
+      if (edit) return respond(res,200,await adminPage(company,site,token,edit));
     }
     const match = /^\/admin\/attachment\/(\d+)$/.exec(route);
     if (match) {
-      const row = db.prepare('SELECT attachment_name, attachment FROM leads WHERE id=?').get(match[1]);
+      const row = await db.get('SELECT attachment_name, attachment FROM leads WHERE id=?',match[1]);
       if (row?.attachment) {
         const name = encodeURIComponent(row.attachment_name.toWellFormed()).replace(/['()*]/g,c=>'%'+c.charCodeAt(0).toString(16));
-        return respond(res,200,row.attachment,'application/octet-stream',{'Content-Disposition':"attachment; filename*=UTF-8''"+name});
+        return respond(res,200,Buffer.from(row.attachment),'application/octet-stream',{'Content-Disposition':"attachment; filename*=UTF-8''"+name});
       }
     }
     fail(404,'Страница не найдена.');
   }
   if (req.method !== 'POST') fail(405,'Метод недоступен.');
   verifyOrigin(req);
-  const form = await formData(req,route==='/admin/model' ? 21*1024*1024 : 5*1024*1024);
+  const form = await formData(req,route==='/admin/model' ? requestLimit : Math.min(requestLimit,5*1024*1024));
   if (!safeEqual(field(form,'_csrf',80),token)) fail(403,'Обновите страницу панели управления.');
   if (route === '/admin/logout') {
-    db.prepare('DELETE FROM sessions WHERE hash=?').run(token);
+    await db.run('DELETE FROM sessions WHERE hash=?',token);
     return redirect(res,'/admin',{'Set-Cookie':cookie('',0)});
   }
   if (route === '/admin/status') {
     const status = field(form,'status');
     if (!Object.hasOwn(statuses,status)) fail(400,'Выберите статус из списка.');
-    db.prepare('UPDATE leads SET status=? WHERE id=?').run(status,field(form,'id'));
+    await db.run('UPDATE leads SET status=? WHERE id=?',status,field(form,'id'));
     return redirect(res,'/admin#leads');
   }
   if (route === '/admin/company') {
@@ -230,13 +250,17 @@ async function admin(req,res,route,company,site) {
     }
     const logo = form.get('logo');
     if (form.has('removeLogo')) next.logo = '';
-    if (file(logo)) next.logo = storeMedia(await prepareImage(logo));
-    db.prepare('UPDATE company SET payload=? WHERE id=1').run(JSON.stringify(next));
+    const image = file(logo) ? await prepareImage(logo) : null;
+    if (image) next.logo = mediaPath(image);
+    await db.batch([
+      ...(image ? [insertMedia(image)] : []),
+      statement('UPDATE company SET payload=? WHERE id=1',JSON.stringify(next))
+    ]);
     return redirect(res,'/admin#company');
   }
   if (route === '/admin/model') {
     const id = field(form,'id');
-    const before = id ? allModels().find(m=>m.id===id) : null;
+    const before = id ? (await allModels()).find(m=>m.id===id) : null;
     if (id && !before) fail(404,'Модель не найдена.');
     const name = field(form,'name',140);
     const category = field(form,'category',80);
@@ -249,35 +273,35 @@ async function admin(req,res,route,company,site) {
       size:field(form,'size',120), material:field(form,'material',40), description:field(form,'description',3000), equipment:field(form,'equipment',3000),
       insulation:field(form,'insulation',3000), changes:field(form,'changes',3000), photos, visible:form.has('visible'), demo:form.has('demo')};
     const images = await Promise.all(added.map(prepareImage));
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      model.photos.push(...images.map(storeMedia));
-      db.prepare('INSERT INTO models VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(model.id,JSON.stringify(model));
-      db.exec('COMMIT');
-    } catch (error) {
-      db.exec('ROLLBACK');
-      throw error;
-    }
+    model.photos.push(...images.map(mediaPath));
+    await db.batch([
+      ...images.map(insertMedia),
+      statement('INSERT INTO models VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload',model.id,JSON.stringify(model))
+    ]);
     return redirect(res,'/admin#models');
   }
   fail(404,'Страница не найдена.');
 }
 
 async function notifyLead(id, payload) {
+  let status = 'failed';
   try {
     const result = await fetch(webhook,{method:'POST',redirect:'error',signal:AbortSignal.timeout(5000),
       headers:{'Content-Type':'application/json',...(process.env.LEAD_WEBHOOK_TOKEN ? {Authorization:'Bearer '+process.env.LEAD_WEBHOOK_TOKEN} : {})},
       body:JSON.stringify({id,...payload})});
-    db.prepare('UPDATE leads SET notification=? WHERE id=?').run(result.ok?'sent':'failed',id);
+    if (result.ok) status = 'sent';
+  } catch {}
+  try {
+    await db.run('UPDATE leads SET notification=? WHERE id=?',status,id);
   } catch {
-    db.prepare('UPDATE leads SET notification=? WHERE id=?').run('failed',id);
+    console.error('Could not save lead notification status.');
   }
 }
 
 async function submitLead(req,res,site,models) {
   if (!site.leads) fail(503,'Приём заявок временно недоступен.');
   verifyOrigin(req);
-  rate('lead-ip:'+req.socket.remoteAddress,35);
+  rate('lead-ip:'+ipAddress(req),35);
   const form = await formData(req, drawingLimit + 96*1024);
   const type = field(form,'type',24);
   const name = field(form,'name',80);
@@ -288,7 +312,7 @@ async function submitLead(req,res,site,models) {
   if (field(form,'website') || !types.has(type) || !name || !phone || (type==='project' && !message) || field(form,'consent')!=='yes') {
     fail(400,'Проверьте имя, телефон, согласие и обязательные поля.');
   }
-  const saved = requestId && db.prepare('SELECT id, phone FROM leads WHERE request_id=?').get(requestId);
+  const saved = requestId && await db.get('SELECT id, phone FROM leads WHERE request_id=?',requestId);
   if (saved) {
     if (saved.phone !== phone) fail(409,'Обновите страницу и отправьте заявку повторно.');
     return json(res,200,{ok:true,id:saved.id});
@@ -301,12 +325,12 @@ async function submitLead(req,res,site,models) {
   const sourcePath = field(form,'source',180);
   const source = paths.includes(sourcePath) || models.some(m=>url(m)===sourcePath) ? sourcePath : '/';
   const createdAt = new Date().toISOString();
-  const result = db.prepare(`INSERT INTO leads(request_id,type,name,phone,model_name,message,source,created_at,legal_version,attachment_name,attachment,notification)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO NOTHING`).run(requestId,type,name,phone,model?.name ?? null,message,source,createdAt,legalVersion,
+  const result = await db.run(`INSERT INTO leads(request_id,type,name,phone,model_name,message,source,created_at,legal_version,attachment_name,attachment,notification)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO NOTHING`,requestId,type,name,phone,model?.name ?? null,message,source,createdAt,legalVersion,
     attachment.name ?? null,attachment.bytes ?? null,webhook?'pending':'off');
-  const row = result.changes ? {id:Number(result.lastInsertRowid),phone} : db.prepare('SELECT id,phone FROM leads WHERE request_id=?').get(requestId);
+  const row = result.changes ? {id:Number(result.lastInsertRowid),phone} : await db.get('SELECT id,phone FROM leads WHERE request_id=?',requestId);
   if (row.phone!==phone) fail(409,'Обновите страницу и отправьте заявку повторно.');
-  if (result.changes && webhook) void notifyLead(row.id,{type,model:model?.name ?? null,createdAt});
+  if (result.changes && webhook) await notifyLead(row.id,{type,model:model?.name ?? null,createdAt});
   if (req.headers.accept?.includes('application/json')) return json(res,201,{ok:true,id:row.id});
   return redirect(res,'/thanks');
 }
@@ -318,20 +342,23 @@ const assets = {
 async function handler(req,res) {
   const location = new URL(req.url,'http://localhost');
   const route = location.pathname;
-  const company = loadCompany();
-  const site = {origin,metrika,demo,leads:demo || process.env.LEADS_ENABLED==='1' && Boolean(company.privacy && company.consent && legalVersion)};
+  let company = defaultCompany;
+  const site = {origin,metrika,demo,hosted,readOnly,drawingMB,leads:false};
   res.setHeader('X-Content-Type-Options','nosniff');
   res.setHeader('X-Frame-Options','DENY');
   res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
   const privateRoute = route.startsWith('/admin') || route==='/lead';
   res.setHeader('Cache-Control',privateRoute ? 'no-store' : 'no-cache');
   if (privateRoute) res.setHeader('X-Robots-Tag','noindex, nofollow');
-  if (origin) res.setHeader('Strict-Transport-Security','max-age=31536000');
+  if (origin || hosted) res.setHeader('Strict-Transport-Security','max-age=31536000');
   const tracking = metrika && !privateRoute;
   res.setHeader('Content-Security-Policy',`default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; script-src 'self'${tracking?' https://mc.yandex.ru':''}; img-src 'self'${tracking?' https://mc.yandex.ru data:':''}; connect-src 'self'${tracking?' https://mc.yandex.ru':''}; style-src 'self'`);
   try {
+    await initialize();
+    company = await loadCompany();
+    site.leads = !readOnly && (demo || process.env.LEADS_ENABLED==='1' && Boolean(company.privacy && company.consent && legalVersion));
     if (route==='/admin' || route.startsWith('/admin/')) return await admin(req,res,route,company,site);
-    if (route==='/lead' && req.method==='POST') return await submitLead(req,res,site,allModels().filter(m=>m.visible));
+    if (route==='/lead' && req.method==='POST') return await submitLead(req,res,site,(await allModels()).filter(m=>m.visible));
     if (!['GET','HEAD'].includes(req.method)) fail(405,'Метод недоступен.');
     if (Object.hasOwn(assets,route)) {
       const name = path.join(__dirname,'public',path.basename(route));
@@ -340,12 +367,12 @@ async function handler(req,res) {
     }
     if (route==='/brand.css') return respond(res,200,`:root{--accent:${company.accent};--ink:${company.ink};--paper:${company.paper}}`,'text/css; charset=utf-8');
     if (/^\/media\/[a-f0-9-]{36}$/.test(route)) {
-      const row = db.prepare('SELECT mime,content FROM media WHERE id=?').get(route.slice(7));
-      if (row) return respond(res,200,row.content,row.mime,{'Cache-Control':'public, max-age=86400'});
+      const row = await db.get('SELECT mime,content FROM media WHERE id=?',route.slice(7));
+      if (row) return respond(res,200,Buffer.from(row.content),row.mime,{'Cache-Control':'public, max-age=86400'});
       fail(404,'Файл не найден.');
     }
     if (route==='/robots.txt') return respond(res,200,origin ? `User-agent: *\nDisallow: /admin\nDisallow: /thanks\nSitemap: ${origin}/sitemap.xml\n` : 'User-agent: *\nDisallow: /\n','text/plain; charset=utf-8');
-    const models = allModels().filter(m=>m.visible);
+    const models = (await allModels()).filter(m=>m.visible);
     if (route==='/sitemap.xml') {
       if (!origin) fail(404,'Укажите SITE_URL для карты сайта.');
       const list = paths.filter(p=>(p!=='/privacy.html'||company.privacy)&&(p!=='/consent.html'||company.consent)).concat(models.map(url));
@@ -372,4 +399,4 @@ function start() {
   });
 }
 if (require.main === module) start();
-module.exports = {handler,start,closeDatabase() { clearInterval(cleanup); db.close(); }};
+module.exports = {handler,start,closeDatabase() { db.close(); }};

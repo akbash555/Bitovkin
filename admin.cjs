@@ -20,7 +20,7 @@ function renderAdmin({company, site, token, models, leads, edit, error = ''}) {
     <label>Материал<select name="material">${['','Металл','Дерево','Комбинированный'].map(value=>`<option value="${value}" ${edit.material===value?'selected':''}>${value || 'По согласованию'}</option>`).join('')}</select></label>
     ${field('size','Размеры',edit.size,'maxlength="120"')}${field('price','Стартовая цена, ₽',edit.price,'type="number" min="1" max="1000000000" step="1"')}
     ${area('description','Описание',edit.description)}${area('equipment','Комплектация',edit.equipment)}${area('insulation','Утепление',edit.insulation)}${area('changes','Индивидуальные изменения',edit.changes)}
-    <label>Добавить фотографии<input type="file" name="photos" accept="image/jpeg,image/png,image/webp" multiple><small>JPEG, PNG или WebP. До 4 МБ на файл, до 5 фотографий в галерее.</small></label>
+    <label>Добавить фотографии<input type="file" name="photos" accept="image/jpeg,image/png,image/webp" multiple><small>JPEG, PNG или WebP. ${site.hosted ? 'До 4 МБ за одну загрузку.' : 'До 4 МБ на файл.'} До 5 фотографий в галерее.</small></label>
     ${edit.photos?.map((p,i)=>`<label class="check"><input type="checkbox" name="removePhoto" value="${e(p)}"><img src="${e(p)}" alt="Фото ${i+1}" width="84" height="56"> Удалить фото ${i+1}</label>`).join('') || ''}
     <label class="check"><input type="checkbox" name="visible" ${edit.visible?'checked':''}> Показывать в каталоге</label>
     <label class="check"><input type="checkbox" name="demo" ${edit.demo?'checked':''}> Демонстрационная модель</label>

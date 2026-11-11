@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "node vercel-build.cjs",
+  "outputDirectory": "vercel-output",
+  "functions": { "api/site.js": { "includeFiles": "public/**" } },
+  "rewrites": [
+    { "source": "/", "destination": "/api/site?__bytovkin_route=" },
+    { "source": "/:route((?!api/|assets/).*)", "destination": "/api/site?__bytovkin_route=:route" }
+  ]
+}
