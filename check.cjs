@@ -48,7 +48,7 @@ async function main() {
   if (hosted) {
     const root = await request('/api/site?__bytovkin_route=');
     assert.equal(root.status,200);
-    assert.match(root.body,/Бытовки и модульные конструкции от производителя/);
+    assert.match(root.body,/data-experience="hero"/);
     const catalog = await request('/api/site?__bytovkin_route=catalog.html&material='+encodeURIComponent('Дерево'));
     assert.equal(catalog.status,200);
     assert.equal(catalog.body.match(/<article class="card"/g).length,3);
@@ -65,16 +65,20 @@ async function main() {
   }
   const home = await request('/');
   assert.equal(home.status,200);
-  assert.match(home.body,/Бытовки и модульные конструкции от производителя/);
+  assert.match(home.body,/data-experience="hero"/);
   assert.equal((await request('/catalog.html')).body.match(/<article class="card"/g).length,16);
   assert.equal((await request('/catalog.html?material='+encodeURIComponent('Дерево'))).body.match(/<article class="card"/g).length,3);
   for (const model of require('./catalog.cjs')) {
     const page = await request('/models/'+model.id+'.html');
     assert.equal(page.status,200);
     assert.ok(page.body.includes('value="'+model.id+'"'));
-    assert.match(page.body,/Цена по запросу/);
+    assert.match(page.body,/Стоимость по запросу/);
+    assert.match(page.body,/data-experience="product"/);
   }
-  for (const route of ['/custom.html','/production.html','/delivery.html','/contacts.html','/privacy.html','/consent.html','/robots.txt','/sitemap.xml','/assets/hero.jpg','/assets/catalog.jpg','/assets/interiors.jpg','/assets/site.js','/assets/style.css']) assert.equal((await request(route)).status,200,route);
+  for (const route of ['/custom.html','/constructor.html','/production.html','/projects.html','/delivery.html','/contacts.html','/privacy.html','/consent.html','/robots.txt','/sitemap.xml','/assets/architecture.jpg','/assets/architecture.css','/assets/hero.jpg','/assets/catalog.jpg','/assets/interiors.jpg','/assets/site.js','/assets/style.css']) assert.equal((await request(route)).status,200,route);
+  const studio = await request('/constructor.html?model=garden');
+  assert.match(studio.body,/data-experience="studio" data-selected="garden"/);
+  assert.match(studio.body,/name="configuration"/);
   assert.equal((await request('/bad-link')).status,404);
   assert.equal((await request('/admin/attachment/1')).status,303);
   assert.equal((await request('/admin/status',{values:{id:'1',status:'closed'}})).status,401);
@@ -119,6 +123,14 @@ async function main() {
   assert.equal((await request('/admin/status',{auth:true,values:{_csrf:'wrong',id,status:'closed'}})).status,403);
   assert.equal((await request('/admin/status',{auth:true,values:{_csrf:csrf,id,status:'closed'}})).status,303);
   assert.match((await request('/admin',{auth:true})).body,/<option value="closed" selected>/);
+  const configured = {...common,phone:'+7 000 000-00-01',type:'quote',model:'garden',source:'/constructor.html'};
+  assert.equal((await request('/lead',{values:configured})).status,400);
+  const configuration = JSON.stringify({...require('./configurator.json').default,length:8.2,roof:'gable',door:'end'});
+  assert.equal((await request('/lead',{values:{...configured,configuration}})).status,201);
+  const savedConfiguration = (await request('/admin',{auth:true})).body;
+  assert.match(savedConfiguration,/Конфигурация 3D/);
+  assert.match(savedConfiguration,/8,2 × 2,4 × 2,6 м/);
+  assert.match(savedConfiguration,/Крыша — Двускатная/);
 
   const photo = new File([fs.readFileSync(path.join(__dirname,'public','hero.jpg'))],'model.jpg',{type:'image/jpeg'});
   const edit = {auth:true,values:{_csrf:csrf,id:'construction',name:'Обновлённая модель',category:'Для стройки',price:'50000',visible:'on',photos:photo}};

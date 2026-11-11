@@ -55,6 +55,17 @@ document.addEventListener('click', event => {
   if (link.hasAttribute('data-cta')) track('cta_click');
 });
 
+if ('IntersectionObserver' in window && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  const sections = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      entry.target.classList.add('enter-section');
+      sections.unobserve(entry.target);
+    }
+  }, {threshold:.15});
+  document.querySelectorAll('.home main > section:not(.hero-shell)').forEach(section => sections.observe(section));
+}
+
 for (const form of document.querySelectorAll('[data-lead]')) {
   const button = form.querySelector('button[type="submit"]');
   const status = form.querySelector('.form-status');

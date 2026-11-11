@@ -3,6 +3,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomBytes, randomUUID, createHash, timingSafeEqual } = require('node:crypto');
 const { openDatabase } = require('./database.cjs');
+const {describeConfiguration} = require('./configuration.cjs');
+const facts = require('./company-facts.json');
 const { render, layout, e, url } = require('./views.cjs');
 const { renderAdmin, statuses } = require('./admin.cjs');
 const seed = require('./catalog.cjs');
@@ -87,7 +89,7 @@ function respond(res, status, content, mime = 'text/html; charset=utf-8', header
 const redirect = (res, href, headers = {}) => respond(res,303,'','text/plain',{Location:href,...headers});
 const json = (res, status, content) => respond(res,status,JSON.stringify(content),'application/json; charset=utf-8');
 const types = new Set(['callback','quote','project']);
-const paths = ['/', '/catalog.html','/custom.html','/production.html','/delivery.html','/contacts.html','/privacy.html','/consent.html'];
+const paths = ['/', '/catalog.html','/constructor.html','/custom.html','/production.html','/delivery.html','/contacts.html','/projects.html','/privacy.html','/consent.html'];
 const cache = new Map();
 const minutes = 60_000;
 const rateWindow = 15 * minutes;
@@ -243,6 +245,9 @@ async function admin(req,res,route,company,site) {
     if (phone && !phoneNumber(phone)) fail(400,'Проверьте телефон.');
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400,'Проверьте адрес электронной почты.');
     const next = {...company,phone,email,address:field(form,'address',300),privacy:field(form,'privacy',20000),consent:field(form,'consent',20000)};
+    next.stats = Object.fromEntries(facts.stats.map(([key,value])=>[key,field(form,'stat_'+key,50)||value]));
+    next.projects = field(form,'projects',5000).split('\n').map(name=>name.trim()).filter(Boolean);
+    next.factsVerified = form.has('factsVerified');
     for (const key of ['accent','ink','paper']) {
       const value = field(form,key);
       if (!/^#[\da-f]{6}$/i.test(value)) fail(400,'Проверьте цвета.');
@@ -306,7 +311,7 @@ async function submitLead(req,res,site,models) {
   const type = field(form,'type',24);
   const name = field(form,'name',80);
   const phone = phoneNumber(field(form,'phone',30));
-  const message = type==='callback' ? '' : field(form,'message',2500);
+  let message = type==='callback' ? '' : field(form,'message',2500);
   const key = field(form,'request_id',40);
   const requestId = /^[a-f0-9-]{36}$/.test(key) ? key : null;
   if (field(form,'website') || !types.has(type) || !name || !phone || (type==='project' && !message) || field(form,'consent')!=='yes') {
@@ -323,6 +328,11 @@ async function submitLead(req,res,site,models) {
   if (modelId && !model) fail(400,'Эта модель больше не доступна. Обновите каталог.');
   const attachment = type==='project' ? await prepareDrawing(form.get('drawing')) : {};
   const sourcePath = field(form,'source',180);
+  if (sourcePath==='/constructor.html') {
+    const configuration = describeConfiguration(field(form,'configuration',700),model);
+    if (!configuration) fail(400,'Не удалось прочитать конфигурацию. Проверьте параметры в конструкторе.');
+    message = [configuration,message].filter(Boolean).join('\n\n');
+  }
   const source = paths.includes(sourcePath) || models.some(m=>url(m)===sourcePath) ? sourcePath : '/';
   const createdAt = new Date().toISOString();
   const result = await db.run(`INSERT INTO leads(request_id,type,name,phone,model_name,message,source,created_at,legal_version,attachment_name,attachment,notification)
@@ -337,6 +347,7 @@ async function submitLead(req,res,site,models) {
 
 const assets = {
   '/assets/style.css':'text/css; charset=utf-8', '/assets/site.js':'application/javascript; charset=utf-8',
+  '/assets/architecture.css':'text/css; charset=utf-8', '/assets/architecture.jpg':'image/jpeg',
   '/assets/hero.jpg':'image/jpeg', '/assets/catalog.jpg':'image/jpeg', '/assets/interiors.jpg':'image/jpeg'
 };
 async function handler(req,res) {
@@ -360,10 +371,12 @@ async function handler(req,res) {
     if (route==='/admin' || route.startsWith('/admin/')) return await admin(req,res,route,company,site);
     if (route==='/lead' && req.method==='POST') return await submitLead(req,res,site,(await allModels()).filter(m=>m.visible));
     if (!['GET','HEAD'].includes(req.method)) fail(405,'Метод недоступен.');
-    if (Object.hasOwn(assets,route)) {
-      const name = path.join(__dirname,'public',path.basename(route));
+    const experienceAsset = /^\/assets\/experience\/[a-z0-9_-]+\.js$/i.test(route);
+    if (Object.hasOwn(assets,route) || experienceAsset) {
+      const name = path.join(__dirname,'public',route.slice('/assets/'.length));
       if (!fs.existsSync(name)) fail(404,'Файл не найден.');
-      return respond(res,200,fs.readFileSync(name),assets[route],{'Cache-Control':'public, max-age=3600'});
+      const mime = experienceAsset ? 'application/javascript; charset=utf-8' : assets[route];
+      return respond(res,200,fs.readFileSync(name),mime,{'Cache-Control':route.endsWith('/main.js')?'no-cache':'public, max-age=3600'});
     }
     if (route==='/brand.css') return respond(res,200,`:root{--accent:${company.accent};--ink:${company.ink};--paper:${company.paper}}`,'text/css; charset=utf-8');
     if (/^\/media\/[a-f0-9-]{36}$/.test(route)) {
@@ -375,7 +388,7 @@ async function handler(req,res) {
     const models = (await allModels()).filter(m=>m.visible);
     if (route==='/sitemap.xml') {
       if (!origin) fail(404,'Укажите SITE_URL для карты сайта.');
-      const list = paths.filter(p=>(p!=='/privacy.html'||company.privacy)&&(p!=='/consent.html'||company.consent)).concat(models.map(url));
+      const list = paths.filter(p=>(p!=='/privacy.html'||company.privacy)&&(p!=='/consent.html'||company.consent)&&(p!=='/projects.html'||company.factsVerified)).concat(models.map(url));
       return respond(res,200,`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${list.map(p=>`<url><loc>${e(origin+p)}</loc></url>`).join('')}</urlset>`,'application/xml; charset=utf-8');
     }
     if (route==='/thanks') return respond(res,200,layout({title:'Заявка принята',description:'Заявка сохранена',path:route,company,site,noindex:true,content:'<section class="wrap section"><h1>Заявка принята</h1><p>Ваше обращение сохранено.</p><a href="/catalog.html">Вернуться в каталог ↗</a></section>'}));

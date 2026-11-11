@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "buildCommand": "node vercel-build.cjs",
+  "buildCommand": "pnpm run build && node vercel-build.cjs",
   "outputDirectory": "vercel-output",
   "functions": { "api/site.js": { "includeFiles": "public/**" } },
   "rewrites": [

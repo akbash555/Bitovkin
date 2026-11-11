@@ -1,4 +1,5 @@
 const { e, layout } = require('./views.cjs');
+const facts = require('./company-facts.json');
 
 const csrf = token => `<input type="hidden" name="_csrf" value="${token}">`;
 const field = (name, label, value = '', options = '') => `<label>${label}<input name="${name}" value="${e(value)}" ${options}></label>`;
@@ -44,6 +45,9 @@ function renderAdmin({company, site, token, models, leads, edit, error = ''}) {
     ${company.logo ? '<label class="check"><input type="checkbox" name="removeLogo"> Удалить текущий логотип</label>' : ''}
     <div class="form-row">${field('accent','Цвет кнопок',company.accent,'type="color"')}${field('ink','Цвет текста',company.ink,'type="color"')}${field('paper','Цвет фона',company.paper,'type="color"')}</div>
     ${area('privacy','Утверждённая политика конфиденциальности',company.privacy,20000)}${area('consent','Утверждённый текст согласия',company.consent,20000)}
+    <h3>Производство и проекты</h3><div class="form-row">${facts.stats.map(([key,value,label])=>field('stat_'+key,label,company.stats?.[key]||value,'maxlength="50"')).join('')}</div>
+    ${area('projects','Проекты — по одному на строку',(company.projects?.length ? company.projects : facts.projects).join('\n'),5000)}
+    <label class="check"><input type="checkbox" name="factsVerified" ${company.factsVerified?'checked':''}> Подтверждаю цифры и проекты для публикации</label>
     <button class="button">Сохранить настройки</button></form>`;
   }
   return layout({title:'Панель управления', description:'Доступ для сотрудников БЫТОВКИн',path:'/admin',company,site,admin:true,content:heading+body+'</section>'});
