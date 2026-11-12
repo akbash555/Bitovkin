@@ -16,7 +16,7 @@ class SceneBoundary extends Component<{ children: ReactNode }, { failed: boolean
 }
 
 function SceneFallback({ message }: { message: string }) {
-  return <div className="scene-fallback"><img src="/images/modular-cabin.jpg" alt="Иллюстрация модульной конструкции" /><div><strong>3D-просмотр недоступен</strong><span>{message} Параметры справа остаются доступными.</span></div></div>
+  return <div className="scene-fallback"><img src={`${import.meta.env.BASE_URL}images/modular-cabin.jpg`} alt="Иллюстрация модульной конструкции" /><div><strong>3D-просмотр недоступен</strong><span>{message} Параметры справа остаются доступными.</span></div></div>
 }
 
 function hasWebGL() {
