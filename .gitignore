@@ -1,9 +1,5 @@
-data/
-.env
-.env.*
-!.env.example
-/.openai/hosting.json
-/.vercel/
-/node_modules/
-/vercel-output/
-/public/experience/
+node_modules/
+.pnpm-store/
+dist/
+*.tsbuildinfo
+.DS_Store
